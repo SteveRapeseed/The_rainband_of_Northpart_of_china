@@ -1,0 +1,111 @@
+import xarray as xr
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs  # 用于绘制地理坐标（含海岸线、经纬度）
+import cartopy.feature as cfeature  # 用于添加地图要素（如海岸线、国界）
+
+# -------------------------- 1. 数据读取与筛选
+# 读取数据并筛选“第30候、500hPa”的位势高度场（变量名默认gh，即geopotential height）
+data_path = r'E:\data\find\JRA55_1961_1980_hgt_pentad_13_67_new.nc'
+
+ds = xr.open_dataset(data_path).sel(
+    pentad=44, 
+    level=500, 
+    method="nearest"  # 兼容数据中无精确500hPa的情况
+)
+
+# 提取关键变量（位势高度gh、经纬度），并选择某一年（如2000年，可改为任意年份）
+
+
+target_year = 1973             #择要绘制的年份
+
+
+gh = ds["hgt"].sel(year=target_year)  # 第30候、500hPa、2000年的高度场
+lon = gh.lon.values  # 经度数组
+lat = gh.lat.values   # 纬度数组
+
+# 单位说明：若gh单位为m（米），5880gpm直接对应5880；若为dam（十米），需改为588
+# 可通过打印gh.attrs查看单位，此处默认单位为m（gpm，位势米）
+
+contour_level_5880 = 5880 # 副高特征线（5880gpm）
+#contour_level_5880 = 5875
+
+# 11-------------------------- 2. 创建绘图对象（含地理坐标）
+# 设置画布大小，采用“ PlateCarree ”投影（等距圆柱投影，适合中低纬度）
+fig = plt.figure(figsize=(14, 8))
+ax = plt.axes(projection=ccrs.PlateCarree())
+
+# 添加地图基础要素（提升可读性）
+ax.add_feature(cfeature.COASTLINE.with_scale("50m"), linewidth=0.8)  # 海岸线（50m分辨率）
+ax.add_feature(cfeature.BORDERS.with_scale("50m"), linewidth=0.5, linestyle="--")  # 国界（虚线）
+ax.add_feature(cfeature.LAND, facecolor="#f0f0f0")  # 陆地填充浅灰色
+ax.add_feature(cfeature.OCEAN, facecolor="#e6f3ff")  # 海洋填充浅蓝色
+
+# 设置经纬度范围（聚焦东亚及西太平洋，副高主要活动区）
+ax.set_extent([40, 180, -20, 50], crs=ccrs.PlateCarree())  # [西经,东经,南纬,北纬]
+
+# 添加经纬度网格（间隔10°，便于定位）
+gl = ax.gridlines(
+    crs=ccrs.PlateCarree(),
+    draw_labels=True,  # 显示经纬度标签
+    linewidth=0.5,
+    linestyle=":",
+    alpha=0.7
+)
+gl.xlabel_style = {"fontsize": 10}  # 经度标签字体大小
+gl.ylabel_style = {"fontsize": 10}  # 纬度标签字体大小
+gl.xlocator = plt.MultipleLocator(10)  # 经度间隔10°
+gl.ylocator = plt.MultipleLocator(10)  # 纬度间隔10°
+
+# -------------------------- 3. 绘制高度场填色图与5880线
+# 3.1 绘制高度场填色图（用渐变色表示高度高低）
+# 定义高度场的填色区间（根据数据范围调整，此处为5000-5960gpm，间隔40gpm）
+levels = range(5000, 5961, 40)
+# 绘制填色图，cmap选择“viridis”（蓝→黄→红，高度越高颜色越暖）
+contourf = ax.contourf(
+    lon, lat, gh.values,  # 经度、纬度、高度场数值
+    levels=levels,
+    cmap="viridis",
+    alpha=0.8,  # 透明度（避免覆盖地图要素）
+    transform=ccrs.PlateCarree()  # 数据的坐标投影（与地图一致）
+)
+
+# 添加颜色条（说明颜色与高度的对应关系）
+cbar = plt.colorbar(
+    contourf, 
+    ax=ax, 
+    shrink=0.8,  # 颜色条长度（相对于画布）
+    pad=0.02,    # 颜色条与图的间距
+    orientation="horizontal"  # 水平放置（更适合展示）
+)
+cbar.set_label(f"500hPa位势高度 (gpm)", fontsize=12)  # 颜色条标签
+cbar.ax.tick_params(labelsize=10)  # 颜色条刻度字体大小
+
+# 3.2 绘制5880gpm等值线（副高核心特征线，用红色加粗突出）
+contour_5880 = ax.contour(
+    lon, lat, gh.values,
+    levels=[contour_level_5880],  # 仅绘制5880gpm这一条线
+    colors="red",
+    linewidths=2.5,  # 线宽加粗
+    linestyles="-",
+    transform=ccrs.PlateCarree()
+)
+
+# 为5880线添加标签（标注“5880”，避免歧义）
+ax.clabel(
+    contour_5880, 
+    inline=True,  # 标签文字嵌入线中
+    fontsize=12,
+    fontweight="bold",  # 字体加粗
+    fmt="%d"  # 整数格式显示（如5880）
+)
+
+# -------------------------- 4. 图表美化与保存
+ax.set_title(
+    f"{target_year}年第30候500hPa高度场（填色）及5880gpm线（红色）",
+    fontsize=16,
+    fontweight="bold",
+    pad=20  # 标题与图的间距
+)
+
+# 显示图片
+plt.show()
