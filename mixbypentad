@@ -1,0 +1,112 @@
+import os
+import gc
+import xarray as xr
+import pandas as pd
+import numpy as np
+
+
+def calculate_pentad_yearly(input_file, output_file):
+    input_file = input_file.strip()
+    output_file = output_file.strip()
+
+    if not os.path.exists(input_file):
+        raise FileNotFoundError(f"输入文件不存在：{input_file}")
+
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
+    try:
+        xr.backends.file_manager.FILE_CACHE.clear()
+    except Exception:
+        pass
+    gc.collect()
+
+    # 打开数据集并按时间排序
+    ds = xr.open_dataset(input_file, engine="netcdf4")
+    ds = ds.sortby("time")
+
+    # 只保留 1961—1980
+    ds = ds.sel(time=slice("1961-01-01", "1980-12-31"))
+
+    # 创建年份和候索引
+    year_indices = []
+    pentad_indices = []
+
+    times = ds.time.values
+    time_data = pd.to_datetime(times)
+
+    for dt in time_data:
+        year = dt.year
+        month = dt.month
+        day = dt.day
+
+        if day <= 5:
+            pentad = (month - 1) * 6 + 1
+        elif day <= 10:
+            pentad = (month - 1) * 6 + 2
+        elif day <= 15:
+            pentad = (month - 1) * 6 + 3
+        elif day <= 20:
+            pentad = (month - 1) * 6 + 4
+        elif day <= 25:
+            pentad = (month - 1) * 6 + 5
+        else:
+            pentad = (month - 1) * 6 + 6
+
+        year_indices.append(year)
+        pentad_indices.append(pentad)
+
+    ds = ds.assign_coords(
+        year=("time", year_indices),
+        pentad=("time", pentad_indices)
+    )
+
+    # 按年份和候分组计算平均值
+    yearly_pentad_mean = ds.groupby(["year", "pentad"]).mean(dim="time")
+
+    # 筛选候范围13到67
+    selected_pentads = yearly_pentad_mean.sel(pentad=slice(13, 67))
+
+    # 建议调整成你后面副高代码习惯的维度顺序
+    for var in selected_pentads.data_vars:
+        dims = selected_pentads[var].dims
+        order = []
+
+        for d in ["level", "lat", "lon", "year", "pentad"]:
+            if d in dims:
+                order.append(d)
+
+        others = [d for d in dims if d not in order]
+        selected_pentads[var] = selected_pentads[var].transpose(*(order + others))
+
+    # 关键：先加载到内存，再关闭输入文件，减少 Windows 文件锁
+    selected_pentads = selected_pentads.load()
+    ds.close()
+
+    try:
+        xr.backends.file_manager.FILE_CACHE.clear()
+    except Exception:
+        pass
+    gc.collect()
+
+    # 保存到新文件名，不覆盖旧文件
+    selected_pentads.to_netcdf(
+        output_file,
+        mode="w",
+        engine="netcdf4"
+    )
+
+    print(f"已成功计算并保存13到67候的逐年数据到 {output_file}")
+    print(f"年份范围: {selected_pentads.year.values[0]} - {selected_pentads.year.values[-1]}")
+    print(f"候范围: {selected_pentads.pentad.values[0]} - {selected_pentads.pentad.values[-1]}")
+    print(f"数据维度: {selected_pentads.dims}")
+
+    return selected_pentads
+
+
+if __name__ == "__main__":
+    input_file = r"E:\data\JRA55_merged_1960_1980_hgt\JRA55_hgt_1960_1980_EA_selected.nc"
+
+    # 关键：换一个新名字，不要再用 JRA551961-1980.nc
+    output_file = r"E:\data\find\JRA55_1961_1980_hgt_pentad_13_67_new.nc"
+
+    result = calculate_pentad_yearly(input_file, output_file)
