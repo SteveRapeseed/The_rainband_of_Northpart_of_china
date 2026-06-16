@@ -1,0 +1,184 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
+from matplotlib.patches import Ellipse
+import os
+
+# -------------------------- 1. 数据预处理
+lon_raw = [106.36, 108.46, 109.61, 114.84, 116.82, 115.4, 114.94, 117.06, 114.69,
+           117.68, 117.44, 117.38, 116.28, 118.58, 118.23, 116.04, 118.69, 119.47,
+           119.32, 122.95, 122.09, 123.04, 120.74, 122.15, 117.95]
+lat_raw = [13.3, 14.49, 15.26, 15.4, 15.2, 15.39, 18.03, 17.75, 18.25, 20.29,
+           22.33, 22.43, 23.51, 25.68, 25.18, 26.40, 29.03, 29.77, 30.61, 29.49,
+           29.52, 29.05, 28.99, 28.72, 27.57]
+
+lon_data = np.array(lon_raw)
+lat_data = np.array(lat_raw)
+point_labels = [str(25 + i) for i in range(len(lon_data))]
+
+# -------------------------- 2. 配置保存路径
+save_dir = r"C:\Users\DELL\Desktop\answer"
+if not os.path.exists(save_dir):
+    os.makedirs(save_dir)
+save_path = os.path.join(save_dir, "lon_lat_points_25-49_final.png")
+
+# -------------------------- 3. 设置地图投影与画布
+proj = ccrs.PlateCarree()
+fig, ax = plt.subplots(figsize=(16, 12), subplot_kw={'projection': proj})
+
+# 子图编号；如果是另一张图，改成 '(b)' 即可
+panel_label = '(a)'
+
+# 统一深红色
+main_red = '#7A0000'
+
+# -------------------------- 4. 设置经纬度范围
+ax.set_extent([100, 130, 10, 35], crs=proj)
+
+# 地图基础要素
+ax.add_feature(cfeature.COASTLINE.with_scale('50m'), linewidth=0.9, color='#222222')
+ax.add_feature(cfeature.BORDERS.with_scale('50m'), linewidth=0.7, linestyle=':', color='#666666')
+ax.add_feature(cfeature.LAND, color='#f8f8f8', alpha=0.95)
+ax.add_feature(cfeature.OCEAN, color='#eaf7ff', alpha=0.8)
+ax.add_feature(cfeature.RIVERS.with_scale('50m'), linewidth=0.5, color='#87CEEB')
+
+# -------------------------- 5. 添加椭圆阴影（深红色、加深）
+ellipse1 = Ellipse(
+    xy=(115.62, 16.67),
+    width=5.5,
+    height=4.5,
+    angle=0,
+    edgecolor='none',
+    facecolor=main_red,
+    alpha=0.78,
+    transform=proj,
+    zorder=2
+)
+ax.add_patch(ellipse1)
+
+ellipse2 = Ellipse(
+    xy=(117.32, 24.25),
+    width=3.5,
+    height=5.0,
+    angle=20,
+    edgecolor='none',
+    facecolor=main_red,
+    alpha=0.78,
+    transform=proj,
+    zorder=2
+)
+ax.add_patch(ellipse2)
+
+ellipse3 = Ellipse(
+    xy=(120.71, 29.19),
+    width=8.0,
+    height=5.5,
+    angle=0,
+    edgecolor='none',
+    facecolor=main_red,
+    alpha=0.78,
+    transform=proj,
+    zorder=2
+)
+ax.add_patch(ellipse3)
+
+# -------------------------- 6. 绘制连接线（改为深红色）
+ax.plot(
+    lon_data, lat_data,
+    color=main_red,
+    linewidth=1.8,
+    linestyle='-',
+    transform=proj,
+    zorder=3
+)
+
+# -------------------------- 7. 数字标签
+# 去掉黑点，仅保留数字标签；标签后不留空白，不加底框
+label_offset = {
+    '33': (-0.6,  0.0, 'right', 'center'),
+    '36': ( 0.0,  0.5, 'center', 'bottom'),
+    '43': (-0.6,  0.0, 'right', 'center'),
+    '44': ( 0.6,  0.0, 'left',  'center'),
+    '45': (-0.6,  0.0, 'right', 'center'),
+}
+
+for lon, lat, label in zip(lon_data, lat_data, point_labels):
+    if label in label_offset:
+        dx, dy, ha, va = label_offset[label]
+    else:
+        dx, dy, ha, va = 0.0, -0.35, 'center', 'top'
+
+    ax.text(
+        lon + dx, lat + dy,
+        label,
+        fontsize=10.5,
+        fontweight='bold',
+        ha=ha,
+        va=va,
+        color='black',
+        transform=proj,
+        zorder=5
+    )
+
+# -------------------------- 8. 标注 G1、G2、G3（字号加大）
+ax.text(115.62 + 2.8, 16.67, 'G1',
+        fontsize=22, fontweight='bold',
+        color=main_red, ha='left', va='center',
+        transform=proj, zorder=6)
+
+ax.text(117.32 + 1.8, 24.25, 'G2',
+        fontsize=22, fontweight='bold',
+        color=main_red, ha='left', va='center',
+        transform=proj, zorder=6)
+
+ax.text(120.71 + 4.1, 29.19, 'G3',
+        fontsize=22, fontweight='bold',
+        color=main_red, ha='left', va='center',
+        transform=proj, zorder=6)
+
+# -------------------------- 9. 坐标轴刻度与网格
+ax.set_xticks(np.arange(100, 131, 5), crs=proj)
+ax.set_yticks(np.arange(10, 36, 5), crs=proj)
+
+lon_formatter = LongitudeFormatter(zero_direction_label=True)
+lat_formatter = LatitudeFormatter()
+ax.xaxis.set_major_formatter(lon_formatter)
+ax.yaxis.set_major_formatter(lat_formatter)
+
+ax.gridlines(
+    draw_labels=False,
+    linestyle='--',
+    alpha=0.7,
+    linewidth=0.8,
+    color='#999999'
+)
+
+# 经纬度标签略微变大
+ax.tick_params(axis='both', which='major', labelsize=15)
+
+# -------------------------- 10. 去掉标题，左上角添加 (a)/(b)
+ax.text(
+    0.02, 0.985, panel_label,
+    transform=ax.transAxes,
+    fontsize=32,   # 这里把 (a) 调大
+    fontweight='bold',
+    ha='left',
+    va='top',
+    color='black',
+    zorder=10
+)
+
+# -------------------------- 11. 保存与显示
+plt.tight_layout()
+plt.savefig(
+    save_path,
+    dpi=300,
+    bbox_inches='tight',
+    facecolor='white',
+    edgecolor='none'
+)
+plt.show()
+
+print(f"修改后的图片已成功保存至：{save_path}")
