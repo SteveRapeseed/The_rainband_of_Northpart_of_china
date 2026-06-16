@@ -1,0 +1,238 @@
+import xarray as xr
+import numpy as np
+import matplotlib.pyplot as plt
+
+# -------------------------- 1. 数据读取
+data_path =r"E:\data\find\JRA55_1961_1980_hgt_pentad_13_67_new.nc"
+target_pentad = 41  # 目标候
+gh_data = xr.open_dataset(data_path).sel(
+    pentad=target_pentad,
+    level=500,
+    method="nearest"
+)["hgt"]
+
+# -------------------------- 2. 提取关键参数
+lon = gh_data.lon.values  # 全局经度数组
+lat = gh_data.lat.values   # 纬度数组（递减顺序）
+year_list = gh_data.year.values # 年份数组
+nt = len(year_list)             # 时间长度
+
+# 转换为numpy数组 - 注意新数据维度顺序为 (level, lat, lon, year, pentad)
+# 我们选择了特定的level和pentad，所以维度变为 (lat, lon, year)
+gh_array = gh_data.values
+
+# 初始化西伸脊点数组（用NaN填充无效值）
+lon_w = np.full(nt, np.nan)
+lat_w = np.full(nt, np.nan)  # 添加纬度存储
+# 标记是否进行过二次修正（用于绘图区分）
+is_corrected = np.full(nt, False)  # False=原始点，True=二次修正点
+
+# -------------------------- 3. 区域参数定义（一次+二次寻找范围）
+# 3.1 一次寻找范围（原逻辑）：90°E~180°E（核心区）
+lon1_min, lon1_max = 90, 180
+idx_lon1_min = np.argmin(np.abs(lon - lon1_min))  # 90°E对应的索引
+idx_lon1_max = np.argmin(np.abs(lon - lon1_max))  # 180°E对应的索引
+
+# 3.2 二次寻找范围（扩大范围）：70°E~180°E（处理90°E附近点）
+lon2_min, lon2_max = 70, 180
+idx_lon2_min = np.argmin(np.abs(lon - lon2_min))  # 70°E对应的索引
+idx_lon2_max = np.argmin(np.abs(lon - lon2_max))  # 180°E对应的索引（与一次相同）
+
+# 3.3 纬度范围（固定副高主体区：5°N~40°N）
+lat_min, lat_max = 5, 40
+idx_lat_min = np.argmin(np.abs(lat - lat_min))
+idx_lat_max = np.argmin(np.abs(lat - lat_max))
+
+# 确保纬度索引顺序正确（从北到南）
+if idx_lat_min < idx_lat_max:
+    idx_lat_min, idx_lat_max = idx_lat_max, idx_lat_min
+
+idx_lat_range = slice(idx_lat_max, idx_lat_min + 1)  # 适配纬度递减
+
+# 打印调试信息
+print(f"经度范围: {lon1_min}-{lon1_max}E, 索引: {idx_lon1_min}-{idx_lon1_max}")
+print(f"纬度范围: {lat_min}-{lat_max}N, 索引: {idx_lat_min}-{idx_lat_max}")
+print(f"数据形状: {gh_array.shape}")
+print(f"年份数量: {nt}")
+
+# -------------------------- 4. 计算西伸脊点（新增二次寻找逻辑）
+for t in range(nt):
+    # -------------------------- 4.1 一次寻找：90°E~180°E（原逻辑，西向东遍历）
+    # 注意：新数据维度为 (lat, lon, year)，所以需要选择特定的年份t
+    gh1_year = gh_array[idx_lat_range, idx_lon1_min:idx_lon1_max+1, t]
+    lon1_year = lon[idx_lon1_min:idx_lon1_max+1]
+    found_5880_1 = False
+    
+    # 一次寻找：优先找≥5880gpm（西向东遍历，第一个满足的为最西点）
+    for i in range(gh1_year.shape[1]):  # 使用实际列数
+        col = gh1_year[:, i]
+        max_idx = np.argmax(col)  # 找到该经度下最大值所在纬度
+        max_gh1 = col[max_idx]
+        if max_gh1 >= 5880:
+            lon_w[t] = lon1_year[i]
+            lat_w[t] = lat[idx_lat_range][max_idx]
+            found_5880_1 = True
+            break
+    
+    # 一次寻找未找到5880gpm，用5870gpm兜底
+    if not found_5880_1:
+        for i in range(gh1_year.shape[1]):
+            col = gh1_year[:, i]
+            max_idx = np.argmax(col)
+            max_gh1 = col[max_idx]
+            if max_gh1 >= 5870:
+                lon_w[t] = lon1_year[i]
+                lat_w[t] = lat[idx_lat_range][max_idx]
+                break
+    
+    # -------------------------- 4.2 二次寻找：若一次结果接近90°E，扩大范围至70°E~180°E
+    # 定义"接近90°E"的区间（±0.5°E，兼容数据精度，避免绝对90°E匹配不到）
+    if not np.isnan(lon_w[t]) and (abs(lon_w[t] - 90) < 0.5):
+        print(f"{year_list[t]}年一次寻找西脊点为{lon_w[t]:.1f}°E（接近90°E），启动二次寻找")
+        
+        gh2_year = gh_array[idx_lat_range, idx_lon2_min:idx_lon2_max+1, t]
+        lon2_year = lon[idx_lon2_min:idx_lon2_max+1]
+        found_5880_2 = False
+        
+        # 二次寻找：优先找≥5880gpm（西向东遍历，但跳过90°E附近干扰）
+        for i in range(gh2_year.shape[1]):
+            current_lon = lon2_year[i]
+            col = gh2_year[:, i]
+            max_idx = np.argmax(col)
+            max_gh2 = col[max_idx]
+            # 条件：≥5880gpm + 远离90°E（89.5~90.5°E）
+            if max_gh2 >= 5880 and not (abs(current_lon - 90) < 0.5):
+                lon_w[t] = current_lon  # 用二次结果覆盖一次结果
+                lat_w[t] = lat[idx_lat_range][max_idx]
+                found_5880_2 = True
+                is_corrected[t] = True  # 标记为修正点
+                break
+        
+        # 二次寻找未找到5880gpm，用5870gpm兜底（同样跳过90°E附近）
+        if not found_5880_2:
+            for i in range(gh2_year.shape[1]):
+                current_lon = lon2_year[i]
+                col = gh2_year[:, i]
+                max_idx = np.argmax(col)
+                max_gh2 = col[max_idx]
+                if max_gh2 >= 5870 and not (abs(current_lon - 90) < 0.5):
+                    lon_w[t] = current_lon
+                    lat_w[t] = lat[idx_lat_range][max_idx]
+                    is_corrected[t] = True
+                    break
+        
+        print(f"  二次寻找后西脊点更新为：{lon_w[t]:.1f}°E")
+
+
+# -------------------------- 5. 绘图（区分原始点与二次修正点）
+plt.figure(figsize=(14, 7))
+
+# 拆分原始点和修正点数据（用于分别绘图）
+original_years = year_list[~is_corrected & ~np.isnan(lon_w)]
+original_lon = lon_w[~is_corrected & ~np.isnan(lon_w)]
+corrected_years = year_list[is_corrected & ~np.isnan(lon_w)]
+corrected_lon = lon_w[is_corrected & ~np.isnan(lon_w)]
+
+# 绘制原始点（红色圆圈，原逻辑结果）
+plt.plot(
+    original_years, original_lon,
+    marker='o', mec='red', mfc='white',
+    linewidth=2, markersize=8, color='red',
+    label='原始西脊点（90°E~180°E寻找）'
+)
+
+# 绘制二次修正点（蓝色五角星，扩大范围后结果）
+if len(corrected_years) > 0:
+    plt.scatter(
+        corrected_years, corrected_lon,
+        color='blue', marker='*', s=150, edgecolor='black', linewidth=2,
+        label='二次修正点（70°E~180°E寻找）', zorder=5  # zorder确保在顶层显示
+    )
+
+# 图表美化与参考线
+plt.xlabel("年份", fontsize=12)
+plt.ylabel("西伸脊点经度（°E）", fontsize=12)
+plt.title(f"1979-2024年第{target_pentad}候500hPa西太副高西伸脊点变化（含90°E二次修正）", fontsize=14)
+plt.grid(alpha=0.3)
+plt.xticks(year_list[::2])  # 每2年显示一个刻度，避免拥挤
+# 添加90°E干扰区参考线（橙色虚线）和120°E副高典型线（灰色虚线）
+plt.axhline(y=90, color='orange', linestyle='--', alpha=0.7, label='90°E（干扰区参考线）')
+plt.axhline(y=120, color='gray', linestyle='--', alpha=0.5, label='120°E（副高典型西伸线）')
+plt.legend(fontsize=10, loc='upper right')  # 图例放在右上角，避免遮挡数据
+plt.tight_layout()  # 自动调整布局，防止标签被截断
+
+# 保存图片（可选，分辨率300dpi，适合报告/论文）
+plt.savefig(
+    r"E:\data\WPAC_subtropical_high_ridge_pentad_corrected.png",
+    dpi=300,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+
+# -------------------------- 6. 输出结果统计（含二次修正信息）
+print("\n" + "="*60)
+print(f"第{target_pentad}候西伸脊点计算完成（含90°E二次修正）！")
+total_valid = np.sum(~np.isnan(lon_w))
+corrected_count = np.sum(is_corrected)
+print(f"总有效年份数：{total_valid}/{nt}")
+print(f"因接近90°E进行二次修正的年份数：{corrected_count}")
+
+# 统计不同阈值及修正类型的年份数量
+count_5880_original = 0  # 原始点中≥5880gpm的年份
+count_5870_original = 0  # 原始点中仅≥5870gpm的年份
+count_5880_corrected = 0 # 修正点中≥5880gpm的年份
+count_5870_corrected = 0 # 修正点中仅≥5870gpm的年份
+
+for t in range(nt):
+    if np.isnan(lon_w[t]):
+        continue
+    # 判断当前点属于原始点还是修正点，提取对应数据
+    if is_corrected[t]:
+        # 修正点：数据来自70°E~180°E
+        gh_year = gh_array[idx_lat_range, idx_lon2_min:idx_lon2_max+1, t]
+        lon_year = lon[idx_lon2_min:idx_lon2_max+1]
+    else:
+        # 原始点：数据来自90°E~180°E
+        gh_year = gh_array[idx_lat_range, idx_lon1_min:idx_lon1_max+1, t]
+        lon_year = lon[idx_lon1_min:idx_lon1_max+1]
+    
+    # 找到西脊点对应的经度索引，验证阈值
+    i = np.argmin(np.abs(lon_year - lon_w[t]))
+    max_gh = np.max(gh_year[:, i])
+    
+    # 分类统计
+    if is_corrected[t]:
+        if max_gh >= 5880:
+            count_5880_corrected += 1
+        else:
+            count_5870_corrected += 1
+    else:
+        if max_gh >= 5880:
+            count_5880_original += 1
+        else:
+            count_5870_original += 1
+
+# 打印详细统计
+print("\n【原始点统计】")
+print(f"  ≥5880gpm的年份数：{count_5880_original}")
+print(f"  仅≥5870gpm的年份数：{count_5870_original}")
+print("\n【二次修正点统计】")
+print(f"  ≥5880gpm的年份数：{count_5880_corrected}")
+print(f"  仅≥5870gpm的年份数：{count_5870_corrected}")
+
+# ==================== 7. 输出逐年经纬度 ====================
+print("\n逐年西脊点经纬度：")
+for y, lo, la in zip(year_list, lon_w, lat_w):
+    if not np.isnan(lo) and not np.isnan(la):
+        print(f"{y}: 经度={lo:.2f}°E, 纬度={la:.2f}°N")
+
+# ==================== 8. 计算经纬度平均值（去掉70°E的点） ====================
+mask_valid = (~np.isnan(lon_w)) & (lon_w != 70)
+mean_lon = np.mean(lon_w[mask_valid])
+mean_lat = np.mean(lat_w[mask_valid])
+
+print("\n舍去70°E点后的西脊点平均经纬度：")
+print(f"  平均经度 = {mean_lon:.2f}°E")
+print(f"  平均纬度 = {mean_lat:.2f}°N")
