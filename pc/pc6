@@ -1,0 +1,298 @@
+import xarray as xr
+import numpy as np
+import matplotlib.pyplot as plt
+from cartopy.io import shapereader
+from shapely.geometry import box
+import cartopy.crs as ccrs
+from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
+from cartopy.mpl.geoaxes import GeoAxes
+from eofs.standard import Eof
+from matplotlib.patches import Patch, Ellipse
+from matplotlib.colors import ListedColormap
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+import warnings
+import os
+
+warnings.filterwarnings('ignore')
+
+proj = ccrs.PlateCarree()
+PC_TO_USE = 6
+CORE_THRESHOLD = 0.65
+CHINA_SHP_PATH = r"C:\Users\DELL\Desktop\Chinashp\China.shp"
+
+lon_raw = [119.3, 109.12, 108.22, 108.75, 109.69, 113.09, 111.48, 107.71, 104.25, 103.88, 106.63, 105.54, 107.5, 107.82]
+lat_raw = [27.36, 25.54, 25.46, 25.29, 24.13, 24.17, 23.85, 22.08, 21.81, 21.19, 20.76, 19.46, 19.06, 19.36]
+lon_data = np.array(lon_raw)
+lat_data = np.array(lat_raw)
+
+
+def get_deeper_green_cmap(n_colors):
+    """
+    保留第一个代码原来的色把颜色和单位设定：
+    0.5以下为大陆底色，不进行填色；越大颜色越深；
+    > 3 的部分再深一档。
+    """
+    n_colors = max(n_colors, 1)
+    colors = plt.cm.Greens(np.linspace(0.32, 0.88, n_colors))
+    cmap = ListedColormap(colors)
+    cmap.set_under('#efefef')
+    cmap.set_over(plt.cm.Greens(0.99))
+    return cmap
+
+
+def compute_beta_map(file_path, pc_mode=PC_TO_USE, start_pentad=13, end_pentad=60):
+    ds = xr.open_dataset(file_path)
+    pre_var = 'pre' if 'pre' in ds.data_vars else list(ds.data_vars)[0]
+    precip = ds[pre_var]
+
+    precip_subset = precip.sel(pentad=slice(start_pentad, end_pentad)) * -1
+    lats = precip_subset['lat'].values
+    lons = precip_subset['lon'].values
+
+    anomalies = (precip_subset - precip_subset.mean('year')).transpose('year', 'pentad', 'lat', 'lon')
+    anomalies_2d = anomalies.values.reshape(-1, len(lats) * len(lons))
+
+    valid_mask = ~np.isnan(anomalies_2d).all(axis=0)
+    solver = Eof(anomalies_2d[:, valid_mask])
+    pc = solver.pcs(npcs=pc_mode, pcscaling=1)[:, pc_mode - 1]
+
+    betas_valid = np.full(np.sum(valid_mask), np.nan)
+    clean_data = anomalies_2d[:, valid_mask]
+    for j in range(clean_data.shape[1]):
+        y = clean_data[:, j]
+        mask = ~np.isnan(y)
+        if mask.sum() < 10:
+            continue
+        betas_valid[j] = np.cov(pc[mask], y[mask])[0, 1] / np.var(pc[mask])
+
+    beta_map = np.full(len(lats) * len(lons), np.nan)
+    beta_map[valid_mask] = betas_valid
+    return beta_map.reshape(len(lats), len(lons)), lats, lons
+
+
+def _load_user_shp_records(shp_path=CHINA_SHP_PATH):
+    if not os.path.exists(shp_path):
+        raise FileNotFoundError(
+            f"未找到国界 shp 文件: {shp_path}\n"
+            "请确认 .shp/.shx/.dbf/.prj 等同名文件在同一目录下。"
+        )
+
+    reader = shapereader.Reader(shp_path)
+    records = list(reader.records())
+    if not records:
+        raise ValueError(f"shp 文件中未读取到几何对象: {shp_path}")
+    return records
+
+
+def _draw_china_only(ax, linewidth=0.8, edgecolor='#a9a9a9', shp_path=CHINA_SHP_PATH):
+    records = _load_user_shp_records(shp_path)
+    geometries = [rec.geometry for rec in records if rec.geometry is not None]
+
+    ax.add_geometries(
+        geometries,
+        crs=proj,
+        facecolor='white',
+        edgecolor=edgecolor,
+        linewidth=linewidth,
+        zorder=1
+    )
+
+
+def _extract_scs_line_geometries(records):
+    keyword_list = ['南海', '九段', '十段', '断续', '国界', '疆界', 'boundary', 'dash', 'u-shape']
+    keyword_hits = []
+    line_geoms = []
+
+    for rec in records:
+        geom = rec.geometry
+        if geom is None:
+            continue
+        geom_type = getattr(geom, 'geom_type', '')
+        attrs = getattr(rec, 'attributes', {}) or {}
+        attr_text = ' '.join([str(v) for v in attrs.values()]).lower()
+
+        if 'line' in geom_type.lower():
+            line_geoms.append(geom)
+            if any(k.lower() in attr_text for k in keyword_list):
+                keyword_hits.append(geom)
+
+    if keyword_hits:
+        return keyword_hits
+    if line_geoms:
+        return line_geoms
+    return []
+
+
+def _draw_scs_dashed_from_shp(ax, shp_path=CHINA_SHP_PATH, linewidth=0.9, color='#5f5f5f'):
+    records = _load_user_shp_records(shp_path)
+    scs_geoms = _extract_scs_line_geometries(records)
+
+    if scs_geoms:
+        clip_extent = box(104, 3, 125, 25)
+        clipped_geoms = []
+        for geom in scs_geoms:
+            try:
+                part = geom.intersection(clip_extent)
+                if not part.is_empty:
+                    clipped_geoms.append(part)
+            except Exception:
+                continue
+
+        if clipped_geoms:
+            ax.add_geometries(
+                clipped_geoms,
+                crs=proj,
+                facecolor='none',
+                edgecolor=color,
+                linewidth=linewidth,
+                linestyle='--',
+                zorder=3
+            )
+
+
+def add_south_china_sea_inset(ax, shp_path=CHINA_SHP_PATH):
+    axins = inset_axes(
+        ax,
+        width="18%",
+        height="31%",
+        loc='lower right',
+        axes_class=GeoAxes,
+        axes_kwargs=dict(map_projection=proj),
+        borderpad=0.8
+    )
+    axins.set_extent([104, 125, 3, 25], crs=proj)
+    axins.set_facecolor('white')
+
+    _draw_china_only(axins, linewidth=0.65, edgecolor='#8f8f8f', shp_path=shp_path)
+    _draw_scs_dashed_from_shp(axins, shp_path=shp_path, linewidth=0.8)
+
+    axins.set_xticks([])
+    axins.set_yticks([])
+    axins.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+    for spine in axins.spines.values():
+        spine.set_linewidth(0.9)
+        spine.set_edgecolor('#4d4d4d')
+    return axins
+
+
+def plot_pc6_positive(fig, ax, beta_map, lats, lons):
+    max_beta_abs = np.nanmax(np.abs(beta_map))
+
+    lat_2d = np.tile(lats[:, np.newaxis], (1, len(lons)))
+    lon_2d = np.tile(lons[np.newaxis, :], (len(lats), 1))
+
+    # 保留第一个代码原来的分析逻辑
+    southeast_mask = (lon_2d > 105.0) & (lat_2d < 30.0)
+    dot_valid_mask = ~southeast_mask
+
+    # 0.5以下不填色，与大陆地区底色一致
+    shade_threshold = 0.5
+    pos_mask = (beta_map > 0) & (beta_map >= shade_threshold)
+    pos_plot = np.where(pos_mask, beta_map, np.nan)
+
+    # 保留第一个代码原来的色把单位与颜色：0.5 到 3，间隔 0.5
+    levels = np.arange(0.5, 3.0 + 0.5, 0.5, dtype=float)
+    cmap = get_deeper_green_cmap(len(levels) - 1)
+
+    im = ax.contourf(
+        lons, lats, pos_plot,
+        cmap=cmap,
+        extend='both',
+        transform=proj,
+        levels=levels,
+        zorder=2
+    )
+
+    dot_mask = (beta_map > 0) & (np.abs(beta_map) >= 0.50 * max_beta_abs) & dot_valid_mask
+    ax.contourf(
+        lons, lats, dot_mask,
+        levels=[0.5, 1.5],
+        colors=['green'],
+        alpha=0.4,
+        transform=proj,
+        zorder=3
+    )
+    ax.contourf(
+        lons, lats, dot_mask,
+        levels=[0.5, 1.5],
+        colors='none',
+        hatches=['...'],
+        transform=proj,
+        zorder=4
+    )
+
+    ellipse = Ellipse(
+        xy=(np.mean(lon_data[1:4]), np.mean(lat_data[1:4])),
+        width=4.5, height=2.2, angle=0,
+        edgecolor='none', facecolor='green', alpha=0.5,
+        transform=proj, zorder=5
+    )
+    ax.add_patch(ellipse)
+
+    ax.set_title('(a) Reg Pre PC6', loc='left', fontsize=20, fontweight='bold', pad=14)
+
+    cbar = fig.colorbar(
+        im, ax=ax,
+        orientation='vertical',
+        location='right',
+        pad=0.028,
+        shrink=0.52,
+        aspect=34,
+        drawedges=True
+    )
+    cbar.set_ticks(levels)
+    cbar.ax.tick_params(labelsize=11)
+
+    if hasattr(cbar, 'dividers') and cbar.dividers is not None:
+        cbar.dividers.set_color('#666666')
+        cbar.dividers.set_linewidth(0.8)
+
+    return im
+
+
+def draw_track(ax):
+    ax.plot(
+        lon_data, lat_data,
+        color='black', linewidth=2.0, linestyle='-',
+        transform=proj, zorder=6
+    )
+    ax.scatter(
+        lon_data, lat_data,
+        color='black', s=40,
+        edgecolors='black', linewidth=1.2,
+        transform=proj, zorder=7
+    )
+
+
+def setup_map(ax, shp_path=CHINA_SHP_PATH):
+    ax.set_extent([73, 136, 12, 54], crs=proj)
+    ax.set_facecolor('#efefef')
+    _draw_china_only(ax, linewidth=0.8, shp_path=shp_path)
+
+    xticks = [75, 90, 105, 120, 135]
+    yticks = [20, 30, 40, 50]
+    ax.set_xticks(xticks, crs=proj)
+    ax.set_yticks(yticks, crs=proj)
+    ax.xaxis.set_major_formatter(LongitudeFormatter())
+    ax.yaxis.set_major_formatter(LatitudeFormatter())
+    ax.tick_params(axis='both', which='major', labelsize=12, length=6, width=1, direction='out')
+
+    add_south_china_sea_inset(ax, shp_path=shp_path)
+
+
+def main(file_path, shp_path=CHINA_SHP_PATH):
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"文件不存在: {file_path}")
+
+    beta_map, lats, lons = compute_beta_map(file_path, pc_mode=PC_TO_USE)
+    fig, ax = plt.subplots(figsize=(10, 8), subplot_kw={'projection': proj})
+    setup_map(ax, shp_path=shp_path)
+    draw_track(ax)
+    plot_pc6_positive(fig, ax, beta_map, lats, lons)
+    plt.tight_layout()
+    plt.show()
+
+
+if __name__ == "__main__":
+    file_path = r"E:\data\find\pre_yearly_1979-2023.nc"
+    main(file_path, shp_path=CHINA_SHP_PATH)
