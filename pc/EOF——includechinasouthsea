@@ -1,0 +1,402 @@
+import xarray as xr
+import numpy as np
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from cartopy.io import shapereader
+from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
+from cartopy.mpl.geoaxes import GeoAxes
+from shapely.geometry import box
+from eofs.standard import Eof
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+from matplotlib.colors import BoundaryNorm
+import warnings
+import os
+
+warnings.filterwarnings('ignore')
+
+# =========================
+# 路径参数
+# =========================
+CHINA_SHP_PATH = r"C:\Users\DELL\Desktop\Chinashp\China.shp"
+
+
+# =========================
+# 南海小图辅助函数
+# =========================
+def _load_user_shp_records(shp_path=CHINA_SHP_PATH):
+    if not os.path.exists(shp_path):
+        raise FileNotFoundError(f"未找到国界 shp 文件: {shp_path}")
+    reader = shapereader.Reader(shp_path)
+    records = list(reader.records())
+    if not records:
+        raise ValueError(f"shp 文件中未读取到几何对象: {shp_path}")
+    return records
+
+
+def _draw_china_only(ax, linewidth=0.6, edgecolor='#7f7f7f', shp_path=CHINA_SHP_PATH):
+    records = _load_user_shp_records(shp_path)
+    geometries = [rec.geometry for rec in records if rec.geometry is not None]
+    ax.add_geometries(
+        geometries,
+        crs=ccrs.PlateCarree(),
+        facecolor='none',
+        edgecolor=edgecolor,
+        linewidth=linewidth,
+        zorder=3
+    )
+
+
+def _extract_scs_line_geometries(records):
+    keyword_list = ['南海', '九段', '十段', '断续', '国界', '疆界', 'boundary', 'dash', 'u-shape']
+    keyword_hits = []
+    line_geoms = []
+
+    for rec in records:
+        geom = rec.geometry
+        if geom is None:
+            continue
+        geom_type = getattr(geom, 'geom_type', '')
+        attrs = getattr(rec, 'attributes', {}) or {}
+        attr_text = ' '.join(str(v) for v in attrs.values()).lower()
+
+        if 'line' in geom_type.lower():
+            line_geoms.append(geom)
+            if any(k.lower() in attr_text for k in keyword_list):
+                keyword_hits.append(geom)
+
+    return keyword_hits if keyword_hits else line_geoms
+
+
+def _draw_scs_dashed(ax, shp_path=CHINA_SHP_PATH, linewidth=0.7, color='#5f5f5f'):
+    records = _load_user_shp_records(shp_path)
+    scs_geoms = _extract_scs_line_geometries(records)
+    if not scs_geoms:
+        return
+
+    clip_extent = box(104, 3, 125, 25)
+    clipped_geoms = []
+
+    for geom in scs_geoms:
+        try:
+            part = geom.intersection(clip_extent)
+            if not part.is_empty:
+                clipped_geoms.append(part)
+        except Exception:
+            continue
+
+    if clipped_geoms:
+        ax.add_geometries(
+            clipped_geoms,
+            crs=ccrs.PlateCarree(),
+            facecolor='none',
+            edgecolor=color,
+            linewidth=linewidth,
+            linestyle='--',
+            zorder=4
+        )
+
+
+def add_south_china_sea_inset(ax, eof_map, levels, cmap, norm, shp_path=CHINA_SHP_PATH):
+    proj = ccrs.PlateCarree()
+    axins = inset_axes(
+        ax,
+        width="17%",
+        height="25%",
+        loc='lower right',
+        axes_class=GeoAxes,
+        axes_kwargs=dict(map_projection=proj),
+        borderpad=0.6
+    )
+
+    scs_extent = [104, 125, 3, 25]
+    axins.set_extent(scs_extent, crs=proj)
+
+    # =========================
+    # 子图背景统一为色标 0.0 左边一档的颜色
+    # shared_levels = np.linspace(-1, 1, 21)，步长为 0.1
+    # 0.0 左边一档为 [-0.1, 0.0)，取中值 -0.05
+    # =========================
+    inset_value = -0.05
+    inset_color = cmap(norm(inset_value))
+
+    axins.patch.set_facecolor(inset_color)
+    axins.patch.set_alpha(1.0)
+    axins.set_facecolor(inset_color)
+
+    # 裁剪到南海小图范围
+    lon_min, lon_max, lat_min, lat_max = scs_extent
+
+    if eof_map.lat[0] < eof_map.lat[-1]:
+        eof_scs = eof_map.sel(
+            lon=slice(lon_min, lon_max),
+            lat=slice(lat_min, lat_max)
+        )
+    else:
+        eof_scs = eof_map.sel(
+            lon=slice(lon_min, lon_max),
+            lat=slice(lat_max, lat_min)
+        )
+
+    # =========================
+    # 有真实 EOF 值的地方：保留主图真实填色
+    # 没有值的地方：用 inset_value 填充，保证上下背景一致
+    # =========================
+    scs_values = eof_scs.values
+
+    scs_plot_values = np.where(
+        np.isfinite(scs_values),
+        scs_values,
+        inset_value
+    )
+
+    # =========================
+    # 关键修正：
+    # 把色标 0 右侧第一档 [0.0, 0.1) 强制改成 0 左侧一档颜色
+    # 防止子图上半部分再次变成色标右侧 0 值颜色
+    # =========================
+    zero_right_mask = (
+        np.isfinite(scs_plot_values) &
+        (scs_plot_values >= 0.0) &
+        (scs_plot_values < 0.1)
+    )
+
+    scs_plot_values = np.where(
+        zero_right_mask,
+        inset_value,
+        scs_plot_values
+    )
+
+    axins.pcolormesh(
+        eof_scs.lon.values,
+        eof_scs.lat.values,
+        scs_plot_values,
+        cmap=cmap,
+        norm=norm,
+        shading='auto',
+        transform=proj,
+        zorder=1
+    )
+
+    _draw_china_only(axins, linewidth=0.55, edgecolor='#8f8f8f', shp_path=shp_path)
+    _draw_scs_dashed(axins, shp_path=shp_path, linewidth=0.7)
+
+    axins.set_xticks([])
+    axins.set_yticks([])
+    axins.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+    axins.set_xlabel('')
+    axins.set_ylabel('')
+
+    for spine in axins.spines.values():
+        spine.set_linewidth(0.8)
+        spine.set_edgecolor('#4d4d4d')
+
+    return axins
+
+
+# =========================
+# 主函数
+# =========================
+def eof_analysis_precipitation(file_path, start_pentad=13, end_pentad=59, n_modes=8):
+
+    # 1. Read data
+    print("Reading data...")
+    try:
+        ds = xr.open_dataset(file_path)
+        print(f"Data variables: {list(ds.data_vars)}")
+        print(f"Data dimensions: {ds.dims}")
+
+        pre_var = 'pre' if 'pre' in ds.data_vars else list(ds.data_vars)[0]
+        print(f"Using variable: {pre_var}")
+
+        precip = ds[pre_var]
+        print("Data successfully loaded!")
+
+    except Exception as e:
+        print(f"Data loading failed: {e}")
+        return
+
+    # 2. Extract pentads
+    print(f"\nExtracting data for pentads {start_pentad} to {end_pentad}...")
+    precip_subset = precip.sel(pentad=slice(start_pentad, end_pentad))
+    print(f"Subset data shape: {precip_subset.shape}")
+
+    # 3. Climatology and anomalies
+    print("\nComputing climatology and anomalies...")
+    clim_mean = precip_subset.mean('year')
+    anomalies = precip_subset - clim_mean
+
+    # 4. Reshape for EOF
+    print("\nPreparing data for EOF analysis...")
+    anomalies_reshaped = anomalies.transpose('year', 'pentad', 'lat', 'lon')
+    n_years = anomalies_reshaped.sizes['year']
+    n_pentads = anomalies_reshaped.sizes['pentad']
+    n_lat = anomalies_reshaped.sizes['lat']
+    n_lon = anomalies_reshaped.sizes['lon']
+
+    anomalies_2d = anomalies_reshaped.values.reshape(n_years * n_pentads, n_lat * n_lon)
+
+    valid_mask = ~np.isnan(anomalies_2d).all(axis=0)
+    anomalies_2d_clean = anomalies_2d[:, valid_mask]
+    print(f"Cleaned data shape: {anomalies_2d_clean.shape}")
+
+    # 5. EOF analysis
+    print("\nPerforming EOF analysis...")
+    solver = Eof(anomalies_2d_clean)
+    eofs = solver.eofs(neofs=n_modes)
+
+    variances = solver.varianceFraction()
+    print(f"Variance contribution of the first {n_modes} EOFs: {variances[:n_modes]}")
+
+    # 6. 重构空间场：原始场用于保存，归一化场用于绘图
+    print("\nReconstructing spatial fields for EOFs...")
+    lat_coords = anomalies_reshaped.lat
+    lon_coords = anomalies_reshaped.lon
+
+    eof_maps_raw = []      # 原始，用于保存 nc
+    eof_maps_norm = []     # 归一化到 [-1,1]，用于绘图
+
+    for i in range(n_modes):
+        eof_map_flat = np.full(n_lat * n_lon, np.nan)
+        eof_map_flat[valid_mask] = eofs[i, :]
+        eof_map = eof_map_flat.reshape(n_lat, n_lon)
+
+        eof_da_raw = xr.DataArray(
+            eof_map,
+            coords={'lat': lat_coords, 'lon': lon_coords},
+            dims=['lat', 'lon']
+        )
+        eof_maps_raw.append(eof_da_raw)
+
+        # 归一化：除以自身最大绝对值
+        eof_abs_max = np.nanmax(np.abs(eof_map))
+        eof_map_norm = eof_map / eof_abs_max if eof_abs_max > 0 else eof_map
+
+        eof_da_norm = xr.DataArray(
+            eof_map_norm,
+            coords={'lat': lat_coords, 'lon': lon_coords},
+            dims=['lat', 'lon']
+        )
+        eof_maps_norm.append(eof_da_norm)
+
+    # 7. Plot（使用归一化场）
+    print("\nGenerating EOF spatial distribution visualization...")
+
+    fig, axes = plt.subplots(
+        4, 2,
+        figsize=(12, 15.2),
+        dpi=300,
+        subplot_kw={'projection': ccrs.PlateCarree()}
+    )
+    axes = axes.flatten()
+
+    # 所有子图统一 levels = [-1, 1]
+    shared_levels = np.linspace(-1, 1, 21)
+
+    # 使用 colormap 对象，并统一 norm
+    shared_cmap = plt.get_cmap('RdBu_r').copy()
+
+    shared_norm = BoundaryNorm(
+        boundaries=shared_levels,
+        ncolors=shared_cmap.N,
+        clip=True
+    )
+
+    mappable = None
+
+    for i in range(n_modes):
+        ax = axes[i]
+        eof_map = eof_maps_norm[i]
+
+        im = eof_map.plot.contourf(
+            ax=ax,
+            levels=shared_levels,
+            cmap=shared_cmap,
+            norm=shared_norm,
+            add_colorbar=False,
+            transform=ccrs.PlateCarree(),
+            extend='both'
+        )
+
+        if mappable is None:
+            mappable = im
+
+        ax.add_feature(cfeature.COASTLINE, linewidth=0.55)
+        ax.add_feature(cfeature.BORDERS, linewidth=0.45)
+
+        gl = ax.gridlines(
+            draw_labels=True,
+            linestyle='--',
+            linewidth=0.4,
+            alpha=0.6
+        )
+        gl.top_labels = False
+        gl.right_labels = False
+        gl.xlabel_style = {'size': 11}
+        gl.ylabel_style = {'size': 11}
+        gl.xformatter = LongitudeFormatter()
+        gl.yformatter = LatitudeFormatter()
+
+        ax.set_xlabel('')
+        ax.set_ylabel('')
+
+        add_south_china_sea_inset(
+            ax,
+            eof_map,
+            levels=shared_levels,
+            cmap=shared_cmap,
+            norm=shared_norm,
+            shp_path=CHINA_SHP_PATH
+        )
+
+        ax.set_title(
+            f'EOF {i+1} ({variances[i]*100:.1f}%)',
+            fontsize=15,
+            fontweight='bold',
+            pad=7
+        )
+
+    plt.subplots_adjust(
+        left=0.05, right=0.98, top=0.97, bottom=0.10,
+        hspace=0.22, wspace=0.12
+    )
+
+    cax = fig.add_axes([0.18, 0.045, 0.64, 0.018])
+    cbar = fig.colorbar(mappable, cax=cax, orientation='horizontal')
+    cbar.ax.tick_params(labelsize=10)
+
+    plt.savefig('eof_analysis_results_4x2_onecolorbar.png', dpi=300, bbox_inches='tight')
+    plt.show()
+    print("\nEOF analysis completed!")
+
+    results = {
+        'eofs': eof_maps_raw,
+        'eofs_norm': eof_maps_norm,
+        'variances': variances,
+    }
+    return results
+
+
+# =========================
+# Run
+# =========================
+if __name__ == "__main__":
+    file_path = r"E:\data\find\test_pre.nc"
+
+    results = eof_analysis_precipitation(file_path, start_pentad=13, end_pentad=59, n_modes=8)
+
+    print("\n=== EOF Analysis Results ===")
+    for i in range(8):
+        print(f"EOF{i+1} Variance Explained: {results['variances'][i]*100:.2f}%")
+
+    # 修复 netCDF 保存：stack 成 (mode, lat, lon) 三维 DataArray
+    eof_stack = xr.concat(results['eofs'], dim='mode')
+    eof_stack['mode'] = np.arange(1, 9)
+
+    output_ds = xr.Dataset({
+        'eofs': eof_stack,
+        'variance_fraction': (['mode'], results['variances'][:8]),
+    })
+
+    output_ds.to_netcdf('eof_analysis_output.nc')
+    print("Results saved as 'eof_analysis_output.nc'")
