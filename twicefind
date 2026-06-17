@@ -1,0 +1,58 @@
+import xarray as xr
+import numpy as np
+
+# -------------------------- 1. 参数设置 --------------------------
+data_path =  r"E:\data\find\JRA55_1961_1980_hgt_pentad_13_67_new.nc"
+target_pentad = 47    # 目标候
+
+target_year = 1972 # 目标年份
+
+threshold = 5880       # 阈值，可修改
+
+# -------------------------- 2. 数据读取 --------------------------
+gh_data = xr.open_dataset(data_path).sel(
+    pentad=target_pentad,
+    level=500,
+    year=target_year,
+    method="nearest"
+)["hgt"]
+
+lon = gh_data.lon.values
+lat = gh_data.lat.values
+gh_array = gh_data.values  # (lat × lon)
+
+# -------------------------- 3. 限定副高核心区 --------------------------
+
+
+lon_min, lon_max = 120,180
+lat_min, lat_max = 10,40
+
+
+idx_lon_min = np.argmin(np.abs(lon - lon_min))
+idx_lon_max = np.argmin(np.abs(lon - lon_max))
+idx_lat_min = np.argmin(np.abs(lat - lat_min))
+idx_lat_max = np.argmin(np.abs(lat - lat_max))
+idx_lat_range = slice(idx_lat_max, idx_lat_min + 1)
+
+gh_sub = gh_array[idx_lat_range, idx_lon_min:idx_lon_max+1]
+lon_sub = lon[idx_lon_min:idx_lon_max+1]
+lat_sub = lat[idx_lat_range]
+
+# -------------------------- 4. 寻找西脊点 --------------------------
+lon_w, lat_w = np.nan, np.nan
+
+for j in range(len(lon_sub)):
+    col = gh_sub[:, j]
+    if np.nanmax(col) >= threshold:  # 找到第一个满足阈值的经度
+        idx_lat_thr = np.where(col >= threshold)[0][0]
+        lon_w = lon_sub[j]
+        lat_w = lat_sub[idx_lat_thr]
+        break
+
+# -------------------------- 5. 输出结果 --------------------------
+if not np.isnan(lon_w):
+    print(f"{target_year}年第{target_pentad}候西脊点：")
+    print(f"  经度 = {lon_w:.2f}°E")
+    print(f"  纬度 = {lat_w:.2f}°N")
+else:
+    print(f"{target_year}年第{target_pentad}候未找到 ≥{threshold} gpm 的西脊点")
