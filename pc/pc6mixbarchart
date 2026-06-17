@@ -1,0 +1,359 @@
+import xarray as xr
+import numpy as np
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+from cartopy.io import shapereader
+from shapely.geometry import box
+from cartopy.mpl.ticker import LongitudeFormatter, LatitudeFormatter
+from cartopy.mpl.geoaxes import GeoAxes
+from eofs.standard import Eof
+from matplotlib.patches import Ellipse
+from matplotlib.colors import ListedColormap
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+import warnings
+import os
+
+warnings.filterwarnings('ignore')
+
+# =========================
+# 路径与核心参数
+# =========================
+CHINA_SHP_PATH = r"C:\Users\DELL\Desktop\Chinashp\China.shp"
+FILE_PATH      = r"E:\data\find\pre_yearly_1979-2023.nc"
+EXPORT_DPI     = 300
+
+PC_TO_USE_MAP  = 6
+PC_TO_USE_TS   = 6
+CORE_THRESHOLD = 0.5
+
+# =========================
+# 整体画布布局
+# =========================
+FIG_SIZE    = (18, 6)
+MAP_AX_POS  = [0.04, 0.08, 0.38, 0.76]
+CBAR_AX_POS = [0.428, 0.20, 0.008, 0.44]
+TS_AX_POS   = [0.52, 0.08, 0.46, 0.76]
+
+proj = ccrs.PlateCarree()
+
+
+def running_mean(data, window):
+    weights = np.ones(window) / window
+    rm = np.convolve(data, weights, mode='valid')
+    pad_len = window // 2
+    return np.pad(rm, (pad_len, window - 1 - pad_len), 'constant', constant_values=np.nan)
+
+
+def get_deeper_green_cmap(n_colors):
+    n_colors = max(n_colors, 1)
+    colors = plt.cm.Greens(np.linspace(0.32, 0.88, n_colors))
+    cmap = ListedColormap(colors)
+    cmap.set_under('#efefef')
+    cmap.set_over(plt.cm.Greens(0.99))
+    return cmap
+
+
+def _load_user_shp_records(shp_path=CHINA_SHP_PATH):
+    if not os.path.exists(shp_path):
+        raise FileNotFoundError(f"未找到国界 shp 文件: {shp_path}")
+    reader = shapereader.Reader(shp_path)
+    records = list(reader.records())
+    if not records:
+        raise ValueError(f"shp 文件中未读取到几何对象: {shp_path}")
+    return records
+
+
+def _draw_china_only(ax, linewidth=0.8, edgecolor='#a9a9a9', shp_path=CHINA_SHP_PATH):
+    records = _load_user_shp_records(shp_path)
+    geometries = [r.geometry for r in records if r.geometry is not None]
+    ax.add_geometries(
+        geometries, crs=proj,
+        facecolor='white', edgecolor=edgecolor,
+        linewidth=linewidth, zorder=1
+    )
+
+
+def _extract_scs_line_geometries(records):
+    keyword_list = ['南海', '九段', '十段', '断续', '国界', '疆界',
+                    'boundary', 'dash', 'u-shape']
+    keyword_hits, line_geoms = [], []
+    for rec in records:
+        geom = rec.geometry
+        if geom is None:
+            continue
+        geom_type = getattr(geom, 'geom_type', '')
+        attrs = getattr(rec, 'attributes', {}) or {}
+        attr_text = ' '.join(str(v) for v in attrs.values()).lower()
+        if 'line' in geom_type.lower():
+            line_geoms.append(geom)
+            if any(k.lower() in attr_text for k in keyword_list):
+                keyword_hits.append(geom)
+    return keyword_hits if keyword_hits else line_geoms
+
+
+def _draw_scs_dashed(ax, shp_path=CHINA_SHP_PATH, linewidth=0.9, color='#5f5f5f'):
+    records = _load_user_shp_records(shp_path)
+    scs_geoms = _extract_scs_line_geometries(records)
+    if not scs_geoms:
+        return
+    clip_extent = box(104, 3, 125, 25)
+    clipped = []
+    for g in scs_geoms:
+        try:
+            part = g.intersection(clip_extent)
+            if not part.is_empty:
+                clipped.append(part)
+        except Exception:
+            pass
+    if clipped:
+        ax.add_geometries(
+            clipped, crs=proj, facecolor='none',
+            edgecolor=color, linewidth=linewidth,
+            linestyle='--', zorder=3
+        )
+
+
+def add_south_china_sea_inset(ax, shp_path=CHINA_SHP_PATH):
+    axins = inset_axes(
+        ax, width="18%", height="31%", loc='lower right',
+        axes_class=GeoAxes,
+        axes_kwargs=dict(map_projection=proj),
+        borderpad=0.8
+    )
+    axins.set_extent([104, 125, 3, 25], crs=proj)
+    axins.set_facecolor('white')
+    _draw_china_only(axins, linewidth=0.65, edgecolor='#8f8f8f', shp_path=shp_path)
+    _draw_scs_dashed(axins, shp_path=shp_path, linewidth=0.8)
+    axins.set_xticks([])
+    axins.set_yticks([])
+    axins.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+    for spine in axins.spines.values():
+        spine.set_linewidth(0.9)
+        spine.set_edgecolor('#4d4d4d')
+    return axins
+
+
+def compute_beta_map(ds, pc_mode, start_pentad=13, end_pentad=60):
+    pre_var = 'pre' if 'pre' in ds.data_vars else list(ds.data_vars)[0]
+    precip = ds[pre_var]
+
+    precip_subset = precip.sel(pentad=slice(start_pentad, end_pentad)) * -1
+    lats = precip_subset['lat'].values
+    lons = precip_subset['lon'].values
+
+    anomalies = (precip_subset - precip_subset.mean('year')).transpose('year', 'pentad', 'lat', 'lon')
+    anomalies_2d = anomalies.values.reshape(-1, len(lats) * len(lons))
+
+    valid_mask = ~np.isnan(anomalies_2d).all(axis=0)
+    solver = Eof(anomalies_2d[:, valid_mask])
+    pc = solver.pcs(npcs=max(8, pc_mode), pcscaling=1)[:, pc_mode - 1]
+
+    clean = anomalies_2d[:, valid_mask]
+    betas = np.full(valid_mask.sum(), np.nan)
+    for j in range(clean.shape[1]):
+        y = clean[:, j]
+        mask = ~np.isnan(y)
+        if mask.sum() < 10:
+            continue
+        betas[j] = np.cov(pc[mask], y[mask])[0, 1] / np.var(pc[mask])
+
+    beta_full = np.full(len(lats) * len(lons), np.nan)
+    beta_full[valid_mask] = betas
+    return beta_full.reshape(len(lats), len(lons)), lats, lons
+
+
+def compute_ts(ds, beta_map, lats, lons, pc_mode, start_pentad=13, end_pentad=60):
+    pre_var = 'pre' if 'pre' in ds.data_vars else list(ds.data_vars)[0]
+    precip = ds[pre_var]
+    precip_subset = precip.sel(pentad=slice(start_pentad, end_pentad))
+
+    max_abs = np.nanmax(np.abs(beta_map))
+    dot_mask = (beta_map > 0) & (np.abs(beta_map) >= 0.50 * max_abs) & ~np.isnan(beta_map)
+    iy, ix = np.where(dot_mask)
+
+    if iy.size == 0:
+        return None, None, None
+
+    precip_core = precip_subset.isel(
+        lat=xr.DataArray(iy, dims='pts'),
+        lon=xr.DataArray(ix, dims='pts')
+    )
+    ts_year = precip_core.mean(dim='pts')
+    mean_ts = ts_year.mean(dim='year').values
+    std_ts = ts_year.std(dim='year', ddof=1).values if ts_year.sizes.get('year', 0) >= 2 else np.zeros_like(mean_ts)
+    pentads = np.arange(start_pentad, end_pentad + 1)
+    return mean_ts, std_ts, pentads
+
+
+lon_raw = [119.3, 109.12, 108.22, 108.75, 109.69, 113.09, 111.48, 107.71, 104.25,
+           103.88, 106.63, 105.54, 107.5, 107.82]
+lat_raw = [27.36, 25.54, 25.46, 25.29, 24.13, 24.17, 23.85, 22.08, 21.81,
+           21.19, 20.76, 19.46, 19.06, 19.36]
+lon_data = np.array(lon_raw)
+lat_data = np.array(lat_raw)
+
+
+def draw_map(fig, beta_map, lats, lons, shp_path=CHINA_SHP_PATH):
+    ax = fig.add_axes(MAP_AX_POS, projection=proj)
+    ax.set_extent([73, 136, 12, 54], crs=proj)
+    ax.set_facecolor('#efefef')
+    _draw_china_only(ax, linewidth=0.8, shp_path=shp_path)
+
+    xticks = [75, 90, 105, 120, 135]
+    yticks = [20, 30, 40, 50]
+    ax.set_xticks(xticks, crs=proj)
+    ax.set_yticks(yticks, crs=proj)
+    ax.xaxis.set_major_formatter(LongitudeFormatter())
+    ax.yaxis.set_major_formatter(LatitudeFormatter())
+    ax.tick_params(axis='both', which='major', labelsize=12,
+                   length=6, width=1, direction='out')
+    add_south_china_sea_inset(ax, shp_path=shp_path)
+
+    ax.plot(lon_data, lat_data, color='black', linewidth=2.0,
+            linestyle='-', transform=proj, zorder=6)
+    ax.scatter(lon_data, lat_data, color='black', s=40,
+               edgecolors='black', linewidth=1.2, transform=proj, zorder=7)
+
+    max_beta_abs = np.nanmax(np.abs(beta_map))
+
+    lat_2d = np.tile(lats[:, np.newaxis], (1, len(lons)))
+    lon_2d = np.tile(lons[np.newaxis, :], (len(lats), 1))
+
+    southeast_mask  = (lon_2d > 105.0) & (lat_2d < 30.0)
+    valid_plot_mask = ~southeast_mask
+
+    shade_threshold = 0.5
+    pos_mask = (beta_map > 0) & (beta_map >= shade_threshold)
+    pos_plot = np.where(pos_mask, beta_map, np.nan)
+
+    levels = np.arange(0.5, 3.0 + 0.5, 0.5, dtype=float)
+    cmap = get_deeper_green_cmap(len(levels) - 1)
+
+    im = ax.contourf(
+        lons, lats, pos_plot,
+        cmap=cmap,
+        extend='both',
+        transform=proj,
+        levels=levels,
+        zorder=2
+    )
+
+    dot_mask = (beta_map > 0) & (np.abs(beta_map) >= 0.50 * max_beta_abs) & valid_plot_mask
+    ax.contourf(
+        lons, lats, dot_mask,
+        levels=[0.5, 1.5],
+        colors=['green'],
+        alpha=0.4,
+        transform=proj,
+        zorder=3
+    )
+    ax.contourf(
+        lons, lats, dot_mask,
+        levels=[0.5, 1.5],
+        colors='none',
+        hatches=['...'],
+        transform=proj,
+        zorder=4
+    )
+
+    ellipse = Ellipse(
+        xy=(np.mean(lon_data[1:4]), np.mean(lat_data[1:4])),
+        width=4.5, height=2.2, angle=0,
+        edgecolor='none', facecolor='green', alpha=0.5,
+        transform=proj, zorder=5
+    )
+    ax.add_patch(ellipse)
+
+    fig.text(MAP_AX_POS[0], MAP_AX_POS[1] + MAP_AX_POS[3] + 0.012,
+             '(a) Reg Pre PC6',
+             fontsize=24, fontweight='bold', va='bottom', ha='left')
+
+    cax = fig.add_axes(CBAR_AX_POS)
+    cbar = fig.colorbar(im, cax=cax, orientation='vertical', drawedges=True)
+    cbar.set_ticks(levels)
+    cbar.ax.tick_params(labelsize=10)
+    if hasattr(cbar, 'dividers') and cbar.dividers is not None:
+        cbar.dividers.set_color('#666666')
+        cbar.dividers.set_linewidth(0.8)
+
+
+def draw_ts(fig, mean_ts, std_ts, pentads):
+    ax_ts = fig.add_axes(TS_AX_POS)
+
+    bar_width = 0.6
+    margin = bar_width * 1.5
+    ax_ts.set_xlim(pentads[0] - margin, pentads[-1] + margin)
+
+    ax_ts.bar(pentads, mean_ts, width=bar_width,
+              color='#90c4e4', alpha=0.6, linewidth=0,
+              zorder=2, label='Mean')
+
+    ax_ts.fill_between(
+        pentads,
+        mean_ts - std_ts,
+        mean_ts + std_ts,
+        color='#d8cfee', alpha=0.35,
+        linewidth=0, zorder=3, label='±1σ'
+    )
+
+    ref_val = np.nanmean(mean_ts)
+    ax_ts.axhline(
+        ref_val, color='red', linestyle='--',
+        linewidth=1.8, zorder=4
+    )
+
+    rm = running_mean(mean_ts, 3)
+    ax_ts.plot(
+        pentads, rm, '-', linewidth=2.2, color='black',
+        zorder=5, label='3-Pentad Running Mean'
+    )
+
+    # ★ 唯一修改：让柱子底部与x轴之间留白
+    ymin, ymax = ax_ts.get_ylim()
+    ax_ts.set_ylim(ymin - (ymax - ymin) * 0.08, ymax)
+
+    ax_ts.set_xlabel('Pentad', fontsize=12)
+    ax_ts.set_ylabel('Precipitation', fontsize=12)
+    ax_ts.tick_params(axis='both', which='major', labelsize=12,
+                      direction='out', length=6, width=1)
+    ax_ts.grid(False)
+    for spine in ax_ts.spines.values():
+        spine.set_linewidth(1.0)
+
+    title_y = MAP_AX_POS[1] + MAP_AX_POS[3] + 0.012
+    fig.text(TS_AX_POS[0], title_y,
+             '(b) Composite PC6',
+             fontsize=24, fontweight='bold', va='bottom', ha='left')
+
+
+def main(file_path=FILE_PATH, shp_path=CHINA_SHP_PATH):
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"文件不存在: {file_path}")
+
+    print("读取数据...")
+    ds = xr.open_dataset(file_path)
+
+    print("计算 beta_map (PC6)...")
+    beta_map, lats, lons = compute_beta_map(ds, pc_mode=PC_TO_USE_MAP)
+
+    print("计算右图时间序列 (PC6)...")
+    mean_ts, std_ts, pentads = compute_ts(ds, beta_map, lats, lons, pc_mode=PC_TO_USE_TS)
+
+    print("绘图...")
+    fig = plt.figure(figsize=FIG_SIZE, facecolor='white')
+
+    draw_map(fig, beta_map, lats, lons, shp_path=shp_path)
+
+    if mean_ts is not None:
+        draw_ts(fig, mean_ts, std_ts, pentads)
+    else:
+        print("警告：未找到核心区域，右图跳过。")
+
+    out_path = 'combined_figure_pc6_modified.png'
+    fig.savefig(out_path, dpi=EXPORT_DPI, facecolor='white', bbox_inches='tight')
+    print(f"已保存: {out_path}")
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()
