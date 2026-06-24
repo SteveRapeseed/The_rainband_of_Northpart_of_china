@@ -1,0 +1,148 @@
+# -*- coding: utf-8 -*-
+import pandas as pd
+import numpy as np
+import glob
+import calendar
+import sys
+import os
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+sys.stdout.reconfigure(encoding='utf-8')
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei']
+plt.rcParams['axes.unicode_minus'] = False
+
+# =========================
+# 1. 读取数据
+# =========================
+print('加载数据...')
+files = sorted(glob.glob(r'e:\station\*.csv'))
+df = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+
+# 取降水字段
+df['PRE'] = df['PRE_Time_0808']
+df.loc[df['PRE'] >= 999990, 'PRE'] = np.nan   # 缺测值处理
+
+# 如果你的降水单位是 0.1 mm，请打开这一句
+# df['PRE'] = df['PRE'] / 10.0
+
+# =========================
+# 2. 计算候序数
+# =========================
+def get_pentad(year, month, day):
+    if day > 25:
+        return (month - 1) * 6 + 6
+    return (month - 1) * 6 + (day - 1) // 5 + 1
+
+df['Pentad'] = df.apply(lambda r: get_pentad(int(r.Year), int(r.Mon), int(r.Day)), axis=1)
+
+# 逐年逐候累加
+df_pentad = df.groupby(['Station_Id_C', 'Year', 'Pentad'])['PRE'].sum().reset_index()
+
+# =========================
+# 3. 站点设置
+# =========================
+station_id = '59758'
+station_name = '海口'
+
+year_start = 1979
+year_end   = 2023
+
+# 参考图从第13候到第67候（3月—11月）
+pentads_all = np.arange(13, 68)
+
+# =========================
+# 4. 提取该站资料并计算多年平均逐候降水
+# =========================
+sub = df_pentad[
+    (df_pentad['Station_Id_C'].astype(str) == station_id) &
+    (df_pentad['Year'] >= year_start) &
+    (df_pentad['Year'] <= year_end) &
+    (df_pentad['Pentad'] >= 13) &
+    (df_pentad['Pentad'] <= 67)
+]
+
+# 每候多年平均
+clim = sub.groupby('Pentad')['PRE'].mean()
+vals = np.array([clim.get(p, np.nan) for p in pentads_all])
+
+# 实线：所有候平均降水
+R_mean = np.nanmean(vals)
+
+# 虚线：1.5倍平均降水
+R_15 = 1.5 * R_mean
+
+print(f'{station_name}站 {year_start}-{year_end} 平均候降水量 R = {R_mean:.2f} mm')
+print(f'1.5R = {R_15:.2f} mm')
+
+# =========================
+# 5. 绘图
+# =========================
+fig, ax = plt.subplots(figsize=(12, 5.5))
+
+# 黑色柱状图
+ax.bar(pentads_all, vals, width=0.72, color='black', edgecolor='black')
+
+# 实线：平均降水
+ax.axhline(R_mean, color='black', linewidth=1.6, linestyle='-')
+
+# 虚线：1.5倍平均降水
+ax.axhline(R_15, color='black', linewidth=1.6, linestyle='--')
+
+# 坐标范围
+ax.set_xlim(12.2, 67.8)
+ymax = np.nanmax(vals)
+ax.set_ylim(0, max(ymax * 1.12, R_15 * 1.12))
+
+# 纵坐标
+ax.set_ylabel('候平均雨量/mm', fontsize=12)
+
+# x轴刻度：奇数候标注
+xticks = np.arange(13, 68, 2)
+ax.set_xticks(xticks)
+ax.set_xticklabels([str(x) for x in xticks], fontsize=10)
+
+# 顶部月份标注
+month_pos = {
+    'Mar': 15.5,
+    'Apr': 21.5,
+    'May': 27.5,
+    'Jun': 33.5,
+    'Jul': 39.5,
+    'Aug': 45.5,
+    'Sep': 51.5,
+    'Oct': 57.5,
+    'Nov': 63.5
+}
+ytop = ax.get_ylim()[1]
+for mon, xpos in month_pos.items():
+    ax.text(xpos, ytop * 0.985, mon, ha='center', va='top', fontsize=11)
+
+# 右上角文字框
+text_str = f'{station_name}\n$\\overline{{R}}$ = {R_mean:.2f} mm'
+ax.text(
+    0.86, 0.86, text_str,
+    transform=ax.transAxes,
+    ha='center', va='top',
+    fontsize=11,
+    bbox=dict(facecolor='white', edgecolor='black', boxstyle='square,pad=0.3')
+)
+
+# 边框和刻度样式
+for spine in ax.spines.values():
+    spine.set_linewidth(1.2)
+
+ax.tick_params(axis='both', labelsize=10)
+ax.set_title(f'{station_name}站 {year_start}—{year_end} 年逐候平均降水量', fontsize=13)
+
+# 输出
+out = r'C:\Users\DELL\Desktop\haikou_fig'
+os.makedirs(out, exist_ok=True)
+
+outfile = os.path.join(out, f'{station_name}_{year_start}_{year_end}_逐候平均降水.png')
+plt.tight_layout()
+fig.savefig(outfile, dpi=300, bbox_inches='tight')
+plt.close()
+
+print(f'完成！图片保存在: {outfile}')
